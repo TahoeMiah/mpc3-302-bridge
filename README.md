@@ -1,26 +1,30 @@
 # mpc3-tcp-bridge
 
 SIMPL# Pro program that loads onto a Crestron **MPC3-302** (or MPC3-301) and
-exposes its buttons, LEDs, mute, and volume over a plain **TCP/IP** socket.
-No MQTT, no HTTP, no Home Assistant glue — just one line of JSON per message,
-in and out.
+exposes its buttons, LEDs, mute, and volume two ways:
+
+- A plain **JSON-over-TCP** socket on port `8023` (one JSON object per
+  line; no MQTT, no HTTP).
+- A **web UI on port `8080`** at `http://<mpc3>:8080/` that mirrors every
+  state change in real time over Server-Sent Events.
 
 Built as a sibling to [`mpc3-ha-bridge`](https://github.com/anouk/mpc3-ha-bridge)
 so the two can be A/B'd on the same hardware. They never run at the same
 time (one program slot at a time).
 
-> **Heads-up — known firmware bug:** on MPC3-302 firmware `1.8001.0251` the
-> panel's `ButtonStateChange` / `PanelStateChange` events don't fire in user
-> programs. LED writes and bargraph updates work fine; physical button presses
-> and rotary turns are silently dropped *at the SDK layer*, before this
-> program ever sees them. That means the **outbound** half of this bridge
-> (server → client events on press) is currently dead on that firmware, and
-> changing transport from MQTT to TCP doesn't fix it. The **inbound** half
-> (client → server LED / volume / mute commands) works. See the
-> `mpc3-slot-registration-bug` memory in `mpc3-ha-bridge` for details and
-> the suspected firmware-update fix.
+> **What was previously documented here as a firmware bug** — "panel
+> `ButtonStateChange` / `PanelStateChange` events don't fire in user
+> programs on MPC3-302 firmware 1.8001.0251" — turned out **not to be a
+> firmware bug**. It was a missing `_panel.Register()` call. The built-in
+> `MPC3x30xTouchscreenSlot` device starts un-registered, and the SDK only
+> delivers callbacks for explicitly-registered devices. With the
+> [single-line Register()](crestron/Mpc3TcpBridge/Hardware/Mpc3Wrapper.cs)
+> call in place, physical button presses, releases, and rotary turns all
+> fire as expected on firmware 1.8001.0298 (likely on 1.8001.0251 too).
+> The sibling `mpc3-ha-bridge` repo almost certainly has the same fix
+> waiting.
 
-## Wire protocol
+## Wire protocol (TCP, port 8023)
 
 One JSON object per line, both directions. Lines are terminated by `\n`
 (`\r\n` accepted on input). UTF-8.
@@ -56,7 +60,7 @@ One JSON object per line, both directions. Lines are terminated by `\n`
 `hello` is sent unsolicited to each client immediately on connect, so a
 client can identify the device without issuing any command.
 
-## Try it from a shell
+### Try it from a shell
 
 ```powershell
 # Windows: ncat (from nmap) or PuTTY in raw mode
@@ -74,11 +78,34 @@ nc 192.168.16.240 8023
 
 Each line you type is one JSON command; each line you receive is one event.
 
+## Web UI (HTTP, port 8080)
+
+Browse to `http://<mpc3>:8080/` and you get a single-page panel that
+mirrors the physical MPC3-302: ten programmable buttons in a 2×5 grid,
+power, volume dial, and mute. The page is self-contained — no external
+assets, no auth, no cookies. It assumes the LAN is trusted (same posture
+as the TCP server).
+
+Routes:
+
+| Method | Path           | Purpose                                                                 |
+| ------ | -------------- | ----------------------------------------------------------------------- |
+| `GET`  | `/`            | The HTML page (CSS/JS inlined)                                          |
+| `GET`  | `/api/state`   | JSON snapshot of LEDs, volume, mute                                     |
+| `GET`  | `/api/events`  | Server-Sent Events stream — pushes every state change as it happens     |
+| `POST` | `/api/cmd`     | Same JSON command vocabulary as the TCP wire (`led`/`vol`/`mute`/`emit`) |
+
+Press a physical button on the panel and the matching tile in the web UI
+lights up blue (`.pressing` highlight) for the duration of the press;
+volume rotary turns update the dial in real time. The web UI and the TCP
+bridge share one in-memory `DeviceState`, so any client can drive state
+that every other client sees.
+
 ## Configuration
 
-The TCP port and bind address come from `/user/appsettings.json` on the
-processor. If the file is missing the defaults apply (`0.0.0.0:8023`, all
-adapters). Start from `crestron/Mpc3TcpBridge/appsettings.sample.json`:
+Settings come from `/User/appsettings.json` on the processor. If the file
+is missing, defaults apply. Start from
+[`crestron/Mpc3TcpBridge/appsettings.sample.json`](crestron/Mpc3TcpBridge/appsettings.sample.json):
 
 ```json
 {
@@ -87,11 +114,19 @@ adapters). Start from `crestron/Mpc3TcpBridge/appsettings.sample.json`:
     "BindAddress": "0.0.0.0",
     "MaxClients": 8,
     "BufferBytes": 4096
+  },
+  "Web": {
+    "Port": 8080,
+    "BindAddress": "0.0.0.0"
+  },
+  "Volume": {
+    "DefaultLevel": 50
   }
 }
 ```
 
-Drop edits in via SCP and `progres -P:01` to reload.
+Set `Web.Port` to `0` to disable the web UI entirely. Edits take effect
+after `progres -P:01`.
 
 ## Build + deploy
 
@@ -103,9 +138,18 @@ $env:MPC_PASS = 'your-admin-password'
 .\tools\Build-And-Deploy.ps1 -Target 192.168.16.240
 ```
 
-Same VS 2008 + SIMPL# Pro plugin requirement as `mpc3-ha-bridge` — the
-post-build packaging step has to run inside the IDE host. The PowerShell
-scripts drive that via COM automation.
+The post-build SIMPL# Pro packaging step must run inside the VS 2008 IDE
+host — `msbuild` alone will produce a `.dll` but not a deployable `.cpz`.
+The PowerShell scripts drive that via VS 2008's DTE COM automation.
+
+For a per-checkout `MPC_PASS` you can paste once and forget, drop a file
+at `.secrets/secrets.env` (gitignored):
+
+```
+MPC_HOST=192.168.16.240
+MPC_USER=admin
+MPC_PASS=your-admin-password
+```
 
 ## Console diagnostics
 
@@ -117,11 +161,16 @@ mpctcp led btn03 on           drive a single LED
 mpctcp vol 75                 set volume bargraph
 mpctcp mute on                set mute state
 mpctcp emit btn03 press       inject a synthetic button event (broadcasts to clients)
-mpctcp clients                list connected TCP clients
+mpctcp clients                show tcp + web client counts
 ```
 
-The `emit` command is the way to verify the server -> client event path
-while the panel-input firmware bug is in effect.
+When a physical button is pressed, you'll also see a `[mpc3] button
+btnXX PRESSED|released` line on the SSH console, and the same line in
+`err` for post-hoc review.
+
+`mpctcp emit` is still useful: it lets you inject button events from the
+console even when no panel is connected — handy for end-to-end testing
+of TCP / web clients without leaving the keyboard.
 
 ## Layout
 
@@ -130,11 +179,13 @@ crestron/
 |-- Mpc3TcpBridge.sln              VS 2008 solution
 `-- Mpc3TcpBridge/
     |-- ControlSystem.cs           entry point + console commands
-    |-- Config/AppSettings.cs      /user/appsettings.json loader
-    |-- Hardware/Mpc3Wrapper.cs    buttons, LEDs, volume <-> DeviceState
+    |-- Config/AppSettings.cs      /User/appsettings.json loader
+    |-- Hardware/Mpc3Wrapper.cs    panel buttons / LEDs / volume <-> DeviceState
     |-- State/DeviceState.cs       in-memory model, event source
     |-- State/ButtonNames.cs       canonical button identifiers
     |-- Tcp/TcpServer.cs           JSON-per-line TCP server (Crestron TCPServer)
+    |-- Web/WebServer.cs           HTTP/1.1 + SSE server (port 8080)
+    |-- Web/Static.cs              inline HTML/CSS/JS for the panel page
     |-- ProgramInfo.config
     |-- appsettings.sample.json
     `-- Properties/
