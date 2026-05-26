@@ -6,6 +6,7 @@ using Mpc3TcpBridge.Config;
 using Mpc3TcpBridge.Hardware;
 using Mpc3TcpBridge.State;
 using Mpc3TcpBridge.Tcp;
+using Mpc3TcpBridge.Web;
 
 namespace Mpc3TcpBridge
 {
@@ -24,6 +25,7 @@ namespace Mpc3TcpBridge
         private DeviceState _state;
         private Mpc3Wrapper _hw;
         private TcpServer _tcp;
+        private WebServer _web;
 
         public ControlSystem()
             : base()
@@ -65,8 +67,21 @@ namespace Mpc3TcpBridge
                 _tcp = new TcpServer(_settings, _state);
                 _tcp.Start();
 
+                if (_settings.Web != null && _settings.Web.Port > 0)
+                {
+                    _web = new WebServer(_state, _settings.Web.Port, _settings.Web.BindAddress);
+                    _web.Start();
+                }
+                else
+                {
+                    CrestronConsole.PrintLine("[web] disabled (Web.Port=0)");
+                }
+
                 RegisterConsoleCommands();
-                CrestronConsole.PrintLine("=== mpc3-tcp-bridge ready on port {0} ===", _settings.Tcp.Port);
+                CrestronConsole.PrintLine(
+                    "=== mpc3-tcp-bridge ready (tcp={0}, web={1}) ===",
+                    _settings.Tcp.Port,
+                    _web == null ? 0 : _web.Port);
             }
             catch (Exception e)
             {
@@ -140,7 +155,10 @@ namespace Mpc3TcpBridge
                 else if (cmd == "clients")
                 {
                     CrestronConsole.ConsoleCommandResponse(
-                        "clients connected: {0}\r\n", _tcp == null ? 0 : _tcp.ClientCount);
+                        "tcp clients: {0}    web clients: {1} (sse: {2})\r\n",
+                        _tcp == null ? 0 : _tcp.ClientCount,
+                        _web == null ? 0 : _web.ClientCount,
+                        _web == null ? 0 : _web.SseClientCount);
                 }
                 else
                 {
@@ -172,6 +190,7 @@ namespace Mpc3TcpBridge
             if (type == eProgramStatusEventType.Stopping)
             {
                 CrestronConsole.PrintLine("=== mpc3-tcp-bridge stopping ===");
+                try { if (_web != null) _web.Dispose(); } catch { }
                 try { if (_tcp != null) _tcp.Dispose(); } catch { }
                 try { if (_hw  != null) _hw.Dispose();  } catch { }
             }

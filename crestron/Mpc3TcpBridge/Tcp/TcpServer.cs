@@ -447,7 +447,6 @@ namespace Mpc3TcpBridge.Tcp
             if (s != null)
             {
                 try { s.Stop(); } catch { }
-                try { s.Dispose(); } catch { }
             }
             lock (_lock) { _accum.Clear(); }
         }

@@ -1,7 +1,7 @@
 using System;
-using System.IO;
 using System.Text;
 using Crestron.SimplSharp;
+using Crestron.SimplSharp.CrestronIO;
 using Newtonsoft.Json;
 
 namespace Mpc3TcpBridge.Config
@@ -17,6 +17,9 @@ namespace Mpc3TcpBridge.Config
     {
         [JsonProperty("Tcp")]
         public TcpSettings Tcp = new TcpSettings();
+
+        [JsonProperty("Web")]
+        public WebSettings Web = new WebSettings();
 
         [JsonProperty("Volume")]
         public VolumeSettings Volume = new VolumeSettings();
@@ -37,6 +40,18 @@ namespace Mpc3TcpBridge.Config
             public int BufferBytes = 4096;
         }
 
+        public sealed class WebSettings
+        {
+            // Port for the HTTP panel UI (GET /, GET /api/state, GET
+            // /api/events SSE, POST /api/cmd). Set to 0 to disable the
+            // web server entirely.
+            [JsonProperty("Port")]
+            public int Port = 8080;
+
+            [JsonProperty("BindAddress")]
+            public string BindAddress = "0.0.0.0";
+        }
+
         public sealed class VolumeSettings
         {
             [JsonProperty("DefaultLevel")]
@@ -51,11 +66,16 @@ namespace Mpc3TcpBridge.Config
             {
                 if (File.Exists(UserPath))
                 {
-                    var text = File.ReadAllText(UserPath, Encoding.UTF8);
+                    string text;
+                    using (var sr = new StreamReader(UserPath, Encoding.UTF8))
+                    {
+                        text = sr.ReadToEnd();
+                    }
                     var s = JsonConvert.DeserializeObject<AppSettings>(text);
                     if (s != null)
                     {
                         if (s.Tcp == null)    s.Tcp    = new TcpSettings();
+                        if (s.Web == null)    s.Web    = new WebSettings();
                         if (s.Volume == null) s.Volume = new VolumeSettings();
                         ErrorLog.Notice("[settings] loaded {0}", UserPath);
                         return s;

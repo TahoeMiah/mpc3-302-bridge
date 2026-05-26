@@ -61,6 +61,40 @@ namespace Mpc3TcpBridge.Hardware
             _panel.ButtonStateChange += OnButtonStateChange;
             _panel.PanelStateChange  += OnPanelStateChange;
 
+            // Workaround attempt for the panel-input bug observed on MPC3-302
+            // firmware 1.8001.0251 *and* 1.8001.0298: ButtonStateChange /
+            // PanelStateChange never fire. Some 3-series firmware versions
+            // only deliver callbacks for explicitly-registered devices, even
+            // on built-in slots. Per the SDK contract, calling Register() on
+            // an already-registered device is a no-op (returns NoAttempt or
+            // Success without side effects), so this is safe to keep even if
+            // it turns out to be unnecessary.
+            try
+            {
+                if (!_panel.Registered)
+                {
+                    var rc = _panel.Register();
+                    if (rc == eDeviceRegistrationUnRegistrationResponse.Success)
+                    {
+                        CrestronConsole.PrintLine("[mpc3] panel.Register() OK");
+                        ErrorLog.Notice("[mpc3] panel.Register() OK");
+                    }
+                    else
+                    {
+                        CrestronConsole.PrintLine("[mpc3] panel.Register() -> {0}", rc);
+                        ErrorLog.Warn("[mpc3] panel.Register() -> {0}", rc);
+                    }
+                }
+                else
+                {
+                    CrestronConsole.PrintLine("[mpc3] panel already registered");
+                }
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Warn("[mpc3] panel.Register() threw: {0}", e.Message);
+            }
+
             // Mirror local state changes back out to the hardware.
             _state.LedChanged    += OnLedRequested;
             _state.VolumeChanged += OnVolumeRequested;
@@ -114,10 +148,28 @@ namespace Mpc3TcpBridge.Hardware
                 string name;
                 if (!_buttonToName.TryGetValue(args.Button, out name))
                 {
-                    ErrorLog.Notice("[mpc3] button event from unknown source");
+                    // Surface unknown-source events on the SSH console so they
+                    // can be diagnosed without re-deploying with extra logs.
+                    CrestronConsole.PrintLine(
+                        "[mpc3] button event from unknown source (state={0})",
+                        args.NewButtonState);
                     return;
                 }
                 bool pressed = args.NewButtonState == eButtonState.Pressed;
+
+                // Physical-button feedback line. Hits the console of every
+                // active SSH session immediately, so you can watch presses
+                // land in real time. Also goes to ErrorLog at Notice level
+                // so they're in `err` for post-hoc review.
+                CrestronConsole.PrintLine(
+                    "[mpc3] button {0} {1}",
+                    name,
+                    pressed ? "PRESSED" : "released");
+                ErrorLog.Notice(
+                    "[mpc3] button {0} {1}",
+                    name,
+                    pressed ? "PRESSED" : "released");
+
                 _state.RecordButtonEvent(name, pressed);
             }
             catch (Exception e)
