@@ -1,0 +1,17 @@
+# Crestron build output
+**/bin/
+**/obj/
+*.cpz
+*.cpz3
+*.lpz
+*.user
+*.tsbuildinfo
+
+# IDE
+.vs/
+.idea/
+*.suo
+*.csproj.user
+
+# Local config (secrets / per-device overrides)
+crestron/Mpc3TcpBridge/appsettings.json
