@@ -1,35 +1,32 @@
 # mpc3-tcp-bridge
 
-SIMPL# Pro program that loads onto a Crestron **MPC3-302** (or MPC3-301) and
-exposes its buttons, LEDs, mute, and volume two ways:
+Your Crestron **MPC3-302** (or MPC3-301) is a perfectly nice wall keypad that
+normally only talks to other Crestron gear. This little SIMPL# Pro program kicks
+the doors open and lets *anything* on your network play with its buttons, LEDs,
+mute, and volume knob — three ways:
 
-- A plain **JSON-over-TCP** socket on port `8023` (one JSON object per
-  line; no MQTT, no HTTP).
-- A **web UI on port `8080`** at `http://<mpc3>:8080/` that mirrors every
-  state change in real time over Server-Sent Events.
+- 🔌 **JSON-over-TCP** on port `8023` — one tidy JSON object per line.
+- 🌐 **A web panel** on port `8080` — a live mirror of the physical keypad,
+  updating in real time, with a settings page baked in.
+- 📡 **MQTT** — publishes everything the panel does and takes commands back,
+  with one-click Home Assistant auto-discovery.
 
-Built as a sibling to [`mpc3-ha-bridge`](https://github.com/anouk/mpc3-ha-bridge)
-so the two can be A/B'd on the same hardware. They never run at the same
-time (one program slot at a time).
+All three share one brain (an in-memory `DeviceState`), so poke it from any
+direction and everyone else sees it instantly — including the physical panel.
 
-> **What was previously documented here as a firmware bug** — "panel
-> `ButtonStateChange` / `PanelStateChange` events don't fire in user
-> programs on MPC3-302 firmware 1.8001.0251" — turned out **not to be a
-> firmware bug**. It was a missing `_panel.Register()` call. The built-in
-> `MPC3x30xTouchscreenSlot` device starts un-registered, and the SDK only
-> delivers callbacks for explicitly-registered devices. With the
-> [single-line Register()](crestron/Mpc3TcpBridge/Hardware/Mpc3Wrapper.cs)
-> call in place, physical button presses, releases, and rotary turns all
-> fire as expected on firmware 1.8001.0298 (likely on 1.8001.0251 too).
-> The sibling `mpc3-ha-bridge` repo almost certainly has the same fix
-> waiting.
+Got a sibling project, [`mpc3-ha-bridge`](https://github.com/anouk/mpc3-ha-bridge),
+that does a similar job a different way. They can't run at the same time (one
+program slot, one winner), so this repo exists to A/B them on the same hardware.
+
+> Heads-up: this trusts your LAN completely. No auth, no TLS, no cookies, no
+> judgement. Keep it on a network you control.
 
 ## Wire protocol (TCP, port 8023)
 
-One JSON object per line, both directions. Lines are terminated by `\n`
-(`\r\n` accepted on input). UTF-8.
+One JSON object per line, both directions. Lines end in `\n` (`\r\n` is fine on
+the way in too). UTF-8, naturally.
 
-### Commands (client → server)
+### You say (client → server)
 
 ```
 {"cmd":"hello"}                                  -> reply: hello event
@@ -38,13 +35,12 @@ One JSON object per line, both directions. Lines are terminated by `\n`
 {"cmd":"led","name":"btn01","on":true}           -> sets LED, broadcasts led event
 {"cmd":"vol","level":75}                         -> sets bargraph + volume state
 {"cmd":"mute","on":true}                         -> sets soft mute state + mute LED
-{"cmd":"emit","name":"btn03","pressed":true}     -> diagnostic: fake a button event
+{"cmd":"emit","name":"btn03","pressed":true}     -> diagnostic: fake a button press
 ```
 
-`name` is one of: `power`, `mute`, `btn01` .. `btn10`.
-`level` is `0..100`.
+`name` is one of: `power`, `mute`, `btn01` .. `btn10`. `level` is `0..100`.
 
-### Events (server → client, broadcast on every connected socket)
+### It says back (server → client, shouted to every connected socket)
 
 ```
 {"event":"hello","version":"0.1.0","port":8023,"buttons":["power","mute","btn01",...]}
@@ -57,10 +53,10 @@ One JSON object per line, both directions. Lines are terminated by `\n`
 {"event":"error","message":"unknown cmd 'foo'"}
 ```
 
-`hello` is sent unsolicited to each client immediately on connect, so a
-client can identify the device without issuing any command.
+`hello` shows up unsolicited the moment you connect, so a client can figure out
+what it's talking to without saying a word first. Polite, really.
 
-### Try it from a shell
+### Kick the tires from a shell
 
 ```powershell
 # Windows: ncat (from nmap) or PuTTY in raw mode
@@ -71,45 +67,43 @@ ncat 192.168.16.240 8023
 ```
 
 ```bash
-# Linux/macOS: plain nc
+# Linux/macOS: good old nc
 nc 192.168.16.240 8023
 {"cmd":"hello"}
 ```
 
-Each line you type is one JSON command; each line you receive is one event.
+Type a line, it's a command. Receive a line, it's an event. That's the whole deal.
 
 ## Web UI (HTTP, port 8080)
 
-Browse to `http://<mpc3>:8080/` and you get a single-page panel that
-mirrors the physical MPC3-302: ten programmable buttons in a 2×5 grid,
-power, volume dial, and mute. The page is self-contained — no external
-assets, no auth, no cookies. It assumes the LAN is trusted (same posture
-as the TCP server).
+Point a browser at `http://<mpc3>:8080/` and you get a slick single-page replica
+of the real keypad: ten programmable buttons in a 2×5 grid, power, a volume dial,
+and mute. It's entirely self-contained — no CDNs, no build step, no tracking, just
+HTML/CSS/JS stuffed into the program. Press a physical button and the matching
+tile lights up blue while you hold it; spin the real knob and the on-screen dial
+chases it. Everyone watching sees the same thing, because it all rides the same
+shared state.
 
-Routes:
+The routes, if you want to script against it:
 
-| Method | Path           | Purpose                                                                 |
+| Method | Path           | What it does                                                            |
 | ------ | -------------- | ----------------------------------------------------------------------- |
-| `GET`  | `/`            | The HTML page (CSS/JS inlined)                                          |
-| `GET`  | `/api/state`   | JSON snapshot of LEDs, volume, mute                                     |
-| `GET`  | `/api/events`  | Server-Sent Events stream — pushes every state change as it happens     |
-| `POST` | `/api/cmd`     | Same JSON command vocabulary as the TCP wire (`led`/`vol`/`mute`/`emit`) |
-| `GET`  | `/config`      | Settings page — edit device name + MQTT broker, Save, Restart           |
-| `GET`  | `/api/settings`| Current settings as JSON (MQTT password redacted)                       |
-| `POST` | `/api/settings`| Persist settings to `/User/appsettings.json` (blank password = keep)    |
-| `POST` | `/api/restart` | `progreset` this program slot (apply MQTT changes)                      |
+| `GET`  | `/`            | The panel page (everything inlined)                                     |
+| `GET`  | `/api/state`   | JSON snapshot of LEDs, volume, mute (+ `mqtt_connected`)                |
+| `GET`  | `/api/events`  | Server-Sent Events — every state change, pushed live                    |
+| `POST` | `/api/cmd`     | Same JSON commands as the TCP wire (`led`/`vol`/`mute`/`emit`)          |
+| `GET`  | `/config`      | Settings page — name the device, point it at MQTT, Save, Restart        |
+| `GET`  | `/api/settings`| Current settings as JSON (MQTT password redacted, obviously)            |
+| `POST` | `/api/settings`| Save settings to `/User/appsettings.json` (blank password = keep old)   |
+| `POST` | `/api/restart` | `progreset` the slot to apply MQTT changes                              |
 
-Press a physical button on the panel and the matching tile in the web UI
-lights up blue (`.pressing` highlight) for the duration of the press;
-volume rotary turns update the dial in real time. The web UI and the TCP
-bridge share one in-memory `DeviceState`, so any client can drive state
-that every other client sees.
+The ⚙️ gear in the top corner takes you to `/config`.
 
 ## Configuration
 
-Settings come from `/User/appsettings.json` on the processor. If the file
-is missing, defaults apply. Start from
-[`crestron/Mpc3TcpBridge/appsettings.sample.json`](crestron/Mpc3TcpBridge/appsettings.sample.json):
+Settings live in `/User/appsettings.json` on the processor. No file? No problem —
+sensible defaults kick in. Crib from
+[`appsettings.sample.json`](crestron/Mpc3TcpBridge/appsettings.sample.json):
 
 ```json
 {
@@ -142,46 +136,48 @@ is missing, defaults apply. Start from
 }
 ```
 
-Set `Web.Port` to `0` to disable the web UI entirely. Edits take effect
-after `progres -P:01`. **You don't have to edit this file by hand** — the
-web UI has a settings page (see below) that writes it for you.
+Set `Web.Port` to `0` to switch the web UI off entirely. Hand-edits apply after
+`progres -P:01` — **but honestly, don't bother editing this by hand.** The
+`/config` page writes it for you and offers a Restart button.
 
 ## MQTT
 
-The bridge can mirror the panel onto an MQTT broker (publish state, accept
-commands) and optionally advertise itself to Home Assistant via MQTT
-discovery. It's **off by default** — point it at your broker from the
-**settings page** (gear icon on the web UI, or `http://<mpc>:8080/config`),
-click Save, then Restart program. No SSH or file editing required.
+Want the keypad in Home Assistant (or any MQTT thing)? Flip MQTT on and the bridge
+will happily narrate everything the panel does and obey commands you send back.
 
-The MQTT client is the dependency-free CF-3.5 MQTT 3.1.1 client shared with
-the sibling `mpc3-ha-bridge` (same role as
-[fasteddy516/SimplMQTT](https://github.com/fasteddy516/SimplMQTT)): CONNECT
-with optional credentials + last-will, QoS-0 PUBLISH/SUBSCRIBE, keepalive,
-and auto-reconnect. No TLS — front it with an MQTT-over-TLS proxy if needed.
+It ships **off**. Turn it on the easy way: open the ⚙️ settings page (or
+`http://<mpc>:8080/config`), type in your broker, hit Save, hit Restart. No SSH,
+no JSON wrangling. The page even shows a little green/grey dot for whether it's
+actually connected.
 
-Topics live under `<BaseTopic>/<DeviceId>/`:
+Under the hood it's a tiny, dependency-free MQTT 3.1.1 client built to survive
+.NET Compact Framework 3.5 (same job as
+[fasteddy516/SimplMQTT](https://github.com/fasteddy516/SimplMQTT), minus the
+SIMPL+ baggage): CONNECT with optional login + last-will, QoS-0 publish/subscribe,
+keepalive, and auto-reconnect when the broker blinks. No TLS — if you need
+encryption, park an MQTT-over-TLS proxy in front of it.
+
+Everything lives under `<BaseTopic>/<DeviceId>/`:
 
 ```
 status                     online | offline   (retained, last-will)
 led/<name>/state           ON | OFF           (retained)   name = power|mute|btn01..btn10
-led/<name>/set             -> subscribe; command an LED on/off
+led/<name>/set             -> you publish here to light an LED
 volume/state               0..100             (retained)
-volume/set                 -> subscribe; set volume
+volume/set                 -> you publish here to set volume
 mute/state                 ON | OFF           (retained)
-mute/set                   -> subscribe; toggle mute
-button/<name>/event        pressed | released (not retained)
+mute/set                   -> you publish here to toggle mute
+button/<name>/event        pressed | released (fired on every physical press)
 ```
 
-With `HaDiscovery: true` it also publishes Home Assistant discovery configs
-under `DiscoveryPrefix` (default `homeassistant`): a switch per LED + mute, a
-number for volume, and device-automation triggers for every button edge — so
-the panel appears in HA with no YAML. Set `HaDiscovery: false` for a plain
-generic-MQTT bridge.
+Leave `HaDiscovery: true` and the panel just *appears* in Home Assistant — a
+switch for every LED + mute, a slider for volume, and press/release triggers for
+all 12 keys, no YAML required. Want plain vanilla MQTT with none of the HA
+sprinkles? Set it to `false`.
 
-To validate without installing a broker, `tools/Test-MqttBroker.ps1` is a
-throwaway single-client broker stub that accepts the connection and prints
-every PUBLISH it receives.
+No broker handy but want to prove it works? `tools/Test-MqttBroker.ps1` is a
+throwaway one-client broker that accepts the connection and prints every message
+the panel publishes.
 
 ## Build + deploy
 
@@ -189,16 +185,16 @@ every PUBLISH it receives.
 .\tools\Build-Cpz.ps1                                # VS 2008 DTE -> .cpz
 $env:MPC_PASS = 'your-admin-password'
 .\tools\Deploy-Cpz.ps1 -Target 192.168.16.240        # SCP + progload
-# or in one shot:
+# ...or do both in one go:
 .\tools\Build-And-Deploy.ps1 -Target 192.168.16.240
 ```
 
-The post-build SIMPL# Pro packaging step must run inside the VS 2008 IDE
-host — `msbuild` alone will produce a `.dll` but not a deployable `.cpz`.
-The PowerShell scripts drive that via VS 2008's DTE COM automation.
+Fair warning: SIMPL# Pro is fussy about packaging. The step that turns your code
+into a loadable `.cpz` only fires inside the **VS 2008** IDE — plain `msbuild`
+gives you a `.dll` and a shrug. The PowerShell scripts drive VS 2008 over COM
+automation so you don't have to click around. (Welcome to 2008. Mind the gap.)
 
-For a per-checkout `MPC_PASS` you can paste once and forget, drop a file
-at `.secrets/secrets.env` (gitignored):
+Tired of typing the password? Drop a gitignored `.secrets/secrets.env`:
 
 ```
 MPC_HOST=192.168.16.240
@@ -206,65 +202,63 @@ MPC_USER=admin
 MPC_PASS=your-admin-password
 ```
 
-## Console diagnostics
+## Poking it over SSH
 
-SSH into the processor and run `mpctcp help`:
+SSH in and run `mpctcp help`:
 
 ```
 mpctcp state                  dump current state
-mpctcp led btn03 on           drive a single LED
-mpctcp vol 75                 set volume bargraph
-mpctcp mute on                set mute state
-mpctcp emit btn03 press       inject a synthetic button event (broadcasts to clients)
-mpctcp clients                show tcp + web client counts
-mpctcp diag                   dump live panel signal values (volume raw/%, CW/CCW, button state)
+mpctcp led btn03 on           light a single LED
+mpctcp vol 75                 set the volume bargraph
+mpctcp mute on                set mute
+mpctcp emit btn03 press       fake a button press (broadcasts to all clients)
+mpctcp clients                how many TCP + web clients are watching
+mpctcp diag                   live panel signals (volume raw/%, CW/CCW, button state)
 ```
 
-When a physical button is pressed, you'll also see a `[mpc3] button
-btnXX PRESSED|released` line on the SSH console, and the same line in
-`err` for post-hoc review.
+Press a real button and you'll see `[mpc3] button btnXX PRESSED|released` on the
+console and in `err`. `mpctcp diag` is your best friend when the knob or buttons
+are misbehaving — it shows exactly what the hardware is reporting. And `mpctcp
+emit` lets you fake presses with no panel attached, handy for testing clients in
+your pajamas.
 
-`mpctcp emit` is still useful: it lets you inject button events from the
-console even when no panel is connected — handy for end-to-end testing
-of TCP / web clients without leaving the keyboard.
-
-## Layout
+## What's where
 
 ```
 crestron/
 |-- Mpc3TcpBridge.sln              VS 2008 solution
 `-- Mpc3TcpBridge/
-    |-- ControlSystem.cs           entry point + console commands
-    |-- Config/AppSettings.cs      /User/appsettings.json loader + saver
-    |-- Hardware/Mpc3Wrapper.cs    panel buttons / LEDs / volume <-> DeviceState
-    |-- State/DeviceState.cs       in-memory model, event source
-    |-- State/ButtonNames.cs       canonical button identifiers
-    |-- Tcp/TcpServer.cs           JSON-per-line TCP server (Crestron TCPServer)
-    |-- Mqtt/MqttClient.cs         dependency-free MQTT 3.1.1 client (CF 3.5)
+    |-- ControlSystem.cs           the conductor: wires settings -> state -> servers
+    |-- Config/AppSettings.cs      reads + writes /User/appsettings.json
+    |-- Hardware/Mpc3Wrapper.cs    the panel whisperer: buttons / LEDs / knob
+    |-- State/DeviceState.cs       the single source of truth + event bus
+    |-- State/ButtonNames.cs       canonical names (power, mute, btn01..btn10)
+    |-- Tcp/TcpServer.cs           JSON-per-line TCP server
+    |-- Mqtt/MqttClient.cs         tiny dependency-free MQTT 3.1.1 client (CF 3.5)
     |-- Mqtt/MqttBridge.cs         DeviceState <-> MQTT + HA discovery
-    |-- Web/WebServer.cs           HTTP/1.1 + SSE server, settings API (port 8080)
-    |-- Web/Static.cs              inline HTML/CSS/JS for the panel + /config pages
+    |-- Web/WebServer.cs           HTTP/1.1 + SSE server + settings API (:8080)
+    |-- Web/Static.cs              the inlined panel + /config pages
     |-- ProgramInfo.config
     |-- appsettings.sample.json
     `-- Properties/
 
 tools/
-|-- Build-Cpz.ps1                  drive VS 2008 DTE to produce .cpz
+|-- Build-Cpz.ps1                  herd VS 2008 into producing a .cpz
 |-- Deploy-Cpz.ps1                 pscp upload + plink progload
-|-- Build-And-Deploy.ps1          chain the two for inner-loop dev
-|-- Watch-Stream.ps1              tail the JSON-over-TCP event stream
-|-- Crestron-Console.ps1         drive the Crestron console over telnet (no SSH)
-`-- Test-MqttBroker.ps1          throwaway MQTT broker stub for end-to-end testing
+|-- Build-And-Deploy.ps1          do both, for fast inner-loop iterating
+|-- Watch-Stream.ps1              tail the live JSON-over-TCP event stream
+|-- Crestron-Console.ps1         drive the Crestron console over telnet (when SSH is AWOL)
+`-- Test-MqttBroker.ps1          a throwaway MQTT broker to test against
 
 docs/
-`-- DESIGN-NOTES.md               architecture + MPC3 firmware findings (read this)
+`-- DESIGN-NOTES.md               the nerdy deep-dive (genuinely worth a read)
 ```
 
-## Further reading
+## Want the full story?
 
-[`docs/DESIGN-NOTES.md`](docs/DESIGN-NOTES.md) is the engineering write-up:
-architecture and data flow, the hard-won MPC3 panel-input findings (the
-`Register()` + `Enable*Button` requirements on firmware 1.8001.6192, absolute
-vs. relative volume reporting, and how a resident Crestron Home / AV-Framework
-app can silently own the front panel), the MQTT design, and the build/deploy
-toolchain.
+[`docs/DESIGN-NOTES.md`](docs/DESIGN-NOTES.md) is where the real adventure lives:
+how the whole thing fits together, and the saga of getting an MPC3 front panel to
+talk at all — the `Register()` + `Enable*Button` incantations the newer firmware
+demands, the great absolute-vs-relative volume mystery, and the time a resident
+Crestron app was quietly eating every button press. If you're hacking on this,
+start there.
