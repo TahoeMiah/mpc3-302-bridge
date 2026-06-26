@@ -32,7 +32,7 @@ namespace Mpc3TcpBridge.Tcp
     // connection so a client can identify the device without polling.
     public sealed class TcpServer : IDisposable
     {
-        private const string Version = "0.1.0";
+        private const string Version = "1.0.0";
 
         private readonly AppSettings _settings;
         private readonly DeviceState _state;

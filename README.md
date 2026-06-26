@@ -21,6 +21,16 @@ program slot, one winner), so this repo exists to A/B them on the same hardware.
 > Heads-up: this trusts your LAN completely. No auth, no TLS, no cookies, no
 > judgement. Keep it on a network you control.
 
+## Install (no Crestron tools required)
+
+Grab **`Mpc3TcpBridge.cpz`** from the [**latest release**](../../releases/latest),
+SFTP it to `/Program01/` on your processor, SSH in and run `progload -P:01`. Two
+steps, no Crestron Toolbox, no SIMPL. Full walkthrough (WinSCP, FileZilla, or
+command line) in [**`docs/INSTALL.md`**](docs/INSTALL.md). Then browse to
+`http://<your-mpc3>:8080/`.
+
+Want to build it yourself instead? Jump to [Build + deploy](#build--deploy).
+
 ## Wire protocol (TCP, port 8023)
 
 One JSON object per line, both directions. Lines end in `\n` (`\r\n` is fine on
