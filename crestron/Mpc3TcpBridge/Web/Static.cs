@@ -206,18 +206,22 @@ namespace Mpc3TcpBridge.Web
   .vol-text .pct { font-size: 11px; color: var(--muted); margin-left: 2px; }
   .vminus, .vplus {
     position: absolute;
-    width: 30px; height: 30px;
+    width: 34px; height: 34px;
     border-radius: 50%;
     background: var(--btn);
     color: var(--muted);
     border: 1px solid var(--border);
     cursor: pointer;
-    font-size: 16px; line-height: 1;
+    font-size: 18px; line-height: 1;
     display: flex; align-items: center; justify-content: center;
+    /* Sit above the ring SVG (which spans the whole dial box) so the
+       clicks land on the button, not the SVG underneath. */
+    z-index: 3;
   }
   .vminus:hover, .vplus:hover { color: var(--text); background: var(--btn-hover); }
-  .vminus { left: -6px; top: 50%; transform: translateY(-50%); }
-  .vplus  { right: -6px; top: 50%; transform: translateY(-50%); }
+  /* Pushed clear of the ring so they're easy to hit. */
+  .vminus { left: -44px; top: 50%; transform: translateY(-50%); }
+  .vplus  { right: -44px; top: 50%; transform: translateY(-50%); }
   .sp-low, .sp-high {
     position: absolute; bottom: 18px;
     color: var(--muted);
@@ -328,6 +332,9 @@ namespace Mpc3TcpBridge.Web
   document.querySelector('.vplus').addEventListener('click', function(){
     send({ cmd: 'vol', level: Math.min(100, state.volume + 5) });
   });
+  document.querySelector('.gear').addEventListener('click', function(){
+    location.href = '/config';
+  });
 
   function send(cmd) {
     return fetch('/api/cmd', {
@@ -404,6 +411,208 @@ namespace Mpc3TcpBridge.Web
 
   // Show the URL hint below the panel.
   $('hint').textContent = 'http://' + location.host;
+})();
+</script>
+</body>
+</html>";
+
+        // Settings / config page served at GET /config. Talks to the same web
+        // server: GET/POST /api/settings, POST /api/restart, GET /api/state.
+        public const string ConfigHtml = @"<!DOCTYPE html>
+<html lang='en'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width, initial-scale=1'>
+<title>MPC3 Settings</title>
+<style>
+  :root {
+    --bg:#07080a; --panel:#111317; --btn:#1a1d23; --btn-hover:#20242b;
+    --border:#23272e; --text:#e6e8eb; --muted:#6b7280; --accent:#4aa3ff; --ok:#34d058;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+    -webkit-font-smoothing:antialiased; padding:32px 24px; }
+  .wrap { max-width:640px; margin:0 auto; }
+  header { display:flex; align-items:center; justify-content:space-between; margin-bottom:6px; }
+  h1 { font-size:18px; font-weight:600; margin:0; }
+  a.back { color:var(--muted); text-decoration:none; font-size:13px; }
+  a.back:hover { color:var(--text); }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  fieldset { background:var(--panel); border:1px solid var(--border); border-radius:14px;
+    padding:14px 18px; margin:0 0 16px; }
+  legend { padding:0 8px; font-weight:600; font-size:13px; color:var(--text); }
+  .row { display:flex; align-items:center; gap:12px; margin:10px 0; }
+  .row label { flex:0 0 150px; color:var(--muted); font-size:13px; }
+  .row input[type=text], .row input[type=password], .row input[type=number] {
+    flex:1; min-width:0; padding:7px 10px; border:1px solid var(--border);
+    border-radius:8px; background:var(--btn); color:var(--text); font:inherit; }
+  .row input[type=checkbox] { width:18px; height:18px; accent-color:var(--accent); }
+  .hint { color:var(--muted); font-size:12px; margin:-4px 0 8px 162px; }
+  .actions { display:flex; gap:12px; margin-top:18px; }
+  button { font:inherit; padding:9px 16px; border-radius:8px; border:1px solid var(--border);
+    background:var(--btn); color:var(--text); cursor:pointer; }
+  button:hover { background:var(--btn-hover); }
+  button.primary { background:var(--accent); color:#04121f; border-color:var(--accent); font-weight:600; }
+  button.danger { background:#3a1414; color:#ff9b9b; border-color:#5a1d1d; }
+  .banner { padding:10px 14px; border-radius:8px; margin:0 0 16px; display:none; font-size:13px; }
+  .banner.show { display:block; }
+  .banner.ok  { background:#0f2417; color:#7ee2a0; border:1px solid #1f5234; }
+  .banner.warn{ background:#2a2410; color:#e8cd7e; border:1px solid #5a4d1d; }
+  .banner.err { background:#2a1414; color:#ff9b9b; border:1px solid #5a1d1d; }
+  .statusline { font-size:12px; color:var(--muted); margin-top:14px; text-align:center; }
+  .pill { display:inline-block; width:8px; height:8px; border-radius:50%; background:#555; margin-right:6px; }
+  .pill.on { background:var(--ok); box-shadow:0 0 8px rgba(52,208,88,.55); }
+</style>
+</head>
+<body>
+<div class='wrap'>
+  <header>
+    <h1>MPC3 Settings</h1>
+    <a class='back' href='/'>&larr; back to panel</a>
+  </header>
+  <div class='sub' id='sub'>Loading&hellip;</div>
+
+  <div id='banner' class='banner'></div>
+
+  <fieldset>
+    <legend>Status</legend>
+    <div class='row'><label>MQTT broker</label>
+      <span><span class='pill' id='mpill'></span><span id='mstat'>unknown</span></span></div>
+  </fieldset>
+
+  <form id='form'>
+    <fieldset>
+      <legend>Device</legend>
+      <div class='row'><label for='DeviceId'>Device ID</label>
+        <input type='text' id='DeviceId'></div>
+      <div class='hint'>MQTT topic + HA unique_id base. Don't rename after first install.</div>
+      <div class='row'><label for='FriendlyName'>Friendly name</label>
+        <input type='text' id='FriendlyName'></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>MQTT</legend>
+      <div class='row'><label for='Mqtt_Enabled'>Enabled</label>
+        <input type='checkbox' id='Mqtt_Enabled'></div>
+      <div class='row'><label for='Mqtt_Host'>Broker host</label>
+        <input type='text' id='Mqtt_Host' placeholder='192.168.1.10'></div>
+      <div class='row'><label for='Mqtt_Port'>Port</label>
+        <input type='number' id='Mqtt_Port' min='1' max='65535'></div>
+      <div class='row'><label for='Mqtt_Username'>Username</label>
+        <input type='text' id='Mqtt_Username' autocomplete='off'></div>
+      <div class='row'><label for='Mqtt_Password'>Password</label>
+        <input type='password' id='Mqtt_Password' autocomplete='new-password' placeholder='(leave blank to keep current)'></div>
+      <div class='row'><label for='Mqtt_BaseTopic'>Base topic</label>
+        <input type='text' id='Mqtt_BaseTopic'></div>
+      <div class='hint'>Topics live under &lt;base&gt;/&lt;device id&gt;/&hellip;</div>
+      <div class='row'><label for='Mqtt_HaDiscovery'>HA discovery</label>
+        <input type='checkbox' id='Mqtt_HaDiscovery'></div>
+      <div class='row'><label for='Mqtt_DiscoveryPrefix'>Discovery prefix</label>
+        <input type='text' id='Mqtt_DiscoveryPrefix'></div>
+      <div class='row'><label for='Mqtt_KeepAliveSeconds'>Keep-alive (s)</label>
+        <input type='number' id='Mqtt_KeepAliveSeconds' min='5' max='3600'></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Volume</legend>
+      <div class='row'><label for='Volume_DefaultLevel'>Startup level (%)</label>
+        <input type='number' id='Volume_DefaultLevel' min='0' max='100'></div>
+    </fieldset>
+
+    <div class='actions'>
+      <button type='submit' class='primary' id='saveBtn'>Save</button>
+      <button type='button' class='danger' id='restartBtn'>Restart program</button>
+      <button type='button' id='reloadBtn'>Reload</button>
+    </div>
+  </form>
+
+  <div class='statusline' id='statusline'></div>
+</div>
+
+<script>
+(function(){
+  var API='/api';
+  function $(id){ return document.getElementById(id); }
+  function banner(kind,msg){ var b=$('banner'); b.className='banner show '+kind; b.textContent=msg; }
+  function clearBanner(){ $('banner').className='banner'; }
+
+  function getJson(p){ return fetch(API+p).then(function(r){ if(!r.ok) throw new Error(p+' -> '+r.status); return r.json(); }); }
+  function postJson(p,body){
+    return fetch(API+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})
+      .then(function(r){ if(!r.ok) return r.text().then(function(t){ throw new Error(t||r.status); }); return r.json(); });
+  }
+
+  function fillForm(s){
+    $('DeviceId').value = s.DeviceId||'';
+    $('FriendlyName').value = s.FriendlyName||'';
+    var m = s.Mqtt||{};
+    $('Mqtt_Enabled').checked = !!m.Enabled;
+    $('Mqtt_Host').value = m.Host||'';
+    $('Mqtt_Port').value = m.Port||1883;
+    $('Mqtt_Username').value = m.Username||'';
+    $('Mqtt_Password').value = '';
+    $('Mqtt_BaseTopic').value = m.BaseTopic||'mpc3';
+    $('Mqtt_HaDiscovery').checked = m.HaDiscovery!==false;
+    $('Mqtt_DiscoveryPrefix').value = m.DiscoveryPrefix||'homeassistant';
+    $('Mqtt_KeepAliveSeconds').value = m.KeepAliveSeconds||30;
+    $('Volume_DefaultLevel').value = (s.Volume&&s.Volume.DefaultLevel)||50;
+    $('sub').textContent = (s.FriendlyName||'MPC3')+' - '+(s.DeviceId||'');
+  }
+
+  function readForm(){
+    return {
+      DeviceId: $('DeviceId').value.trim(),
+      FriendlyName: $('FriendlyName').value.trim(),
+      Mqtt: {
+        Enabled: $('Mqtt_Enabled').checked,
+        Host: $('Mqtt_Host').value.trim(),
+        Port: parseInt($('Mqtt_Port').value,10)||1883,
+        Username: $('Mqtt_Username').value,
+        Password: $('Mqtt_Password').value,
+        BaseTopic: $('Mqtt_BaseTopic').value.trim()||'mpc3',
+        HaDiscovery: $('Mqtt_HaDiscovery').checked,
+        DiscoveryPrefix: $('Mqtt_DiscoveryPrefix').value.trim()||'homeassistant',
+        KeepAliveSeconds: parseInt($('Mqtt_KeepAliveSeconds').value,10)||30
+      },
+      Volume: { DefaultLevel: parseInt($('Volume_DefaultLevel').value,10)||50 }
+    };
+  }
+
+  function refreshStatus(){
+    getJson('/state').then(function(s){
+      var up = !!s.mqtt_connected;
+      $('mpill').className = 'pill'+(up?' on':'');
+      $('mstat').textContent = up ? 'connected' : 'not connected';
+    }).catch(function(){ $('mstat').textContent='?'; });
+  }
+
+  function load(){
+    clearBanner();
+    getJson('/settings').then(function(s){
+      fillForm(s);
+      $('statusline').textContent = 'Loaded from \\User\\appsettings.json';
+    }).catch(function(e){ banner('err','Could not load settings: '+e.message); });
+  }
+
+  $('form').addEventListener('submit', function(ev){
+    ev.preventDefault(); clearBanner();
+    postJson('/settings', readForm()).then(function(){
+      banner('ok','Saved. Click Restart program to apply MQTT changes.');
+    }).catch(function(e){ banner('err','Save failed: '+e.message); });
+  });
+  $('restartBtn').addEventListener('click', function(){
+    if(!confirm('Restart the program slot now? The bridge will be offline ~10s.')) return;
+    clearBanner();
+    postJson('/restart',{}).then(function(){
+      banner('warn','Restart requested - reload this page in ~10s.');
+    }).catch(function(e){ banner('err','Restart failed: '+e.message); });
+  });
+  $('reloadBtn').addEventListener('click', load);
+
+  load();
+  refreshStatus();
+  setInterval(refreshStatus, 3000);
 })();
 </script>
 </body>

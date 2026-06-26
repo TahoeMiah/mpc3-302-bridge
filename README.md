@@ -94,6 +94,10 @@ Routes:
 | `GET`  | `/api/state`   | JSON snapshot of LEDs, volume, mute                                     |
 | `GET`  | `/api/events`  | Server-Sent Events stream — pushes every state change as it happens     |
 | `POST` | `/api/cmd`     | Same JSON command vocabulary as the TCP wire (`led`/`vol`/`mute`/`emit`) |
+| `GET`  | `/config`      | Settings page — edit device name + MQTT broker, Save, Restart           |
+| `GET`  | `/api/settings`| Current settings as JSON (MQTT password redacted)                       |
+| `POST` | `/api/settings`| Persist settings to `/User/appsettings.json` (blank password = keep)    |
+| `POST` | `/api/restart` | `progreset` this program slot (apply MQTT changes)                      |
 
 Press a physical button on the panel and the matching tile in the web UI
 lights up blue (`.pressing` highlight) for the duration of the press;
@@ -109,6 +113,8 @@ is missing, defaults apply. Start from
 
 ```json
 {
+  "DeviceId": "mpc3-302",
+  "FriendlyName": "MPC3 Controller",
   "Tcp": {
     "Port": 8023,
     "BindAddress": "0.0.0.0",
@@ -119,6 +125,17 @@ is missing, defaults apply. Start from
     "Port": 8080,
     "BindAddress": "0.0.0.0"
   },
+  "Mqtt": {
+    "Enabled": false,
+    "Host": "",
+    "Port": 1883,
+    "Username": "",
+    "Password": "",
+    "BaseTopic": "mpc3",
+    "HaDiscovery": true,
+    "DiscoveryPrefix": "homeassistant",
+    "KeepAliveSeconds": 30
+  },
   "Volume": {
     "DefaultLevel": 50
   }
@@ -126,7 +143,45 @@ is missing, defaults apply. Start from
 ```
 
 Set `Web.Port` to `0` to disable the web UI entirely. Edits take effect
-after `progres -P:01`.
+after `progres -P:01`. **You don't have to edit this file by hand** — the
+web UI has a settings page (see below) that writes it for you.
+
+## MQTT
+
+The bridge can mirror the panel onto an MQTT broker (publish state, accept
+commands) and optionally advertise itself to Home Assistant via MQTT
+discovery. It's **off by default** — point it at your broker from the
+**settings page** (gear icon on the web UI, or `http://<mpc>:8080/config`),
+click Save, then Restart program. No SSH or file editing required.
+
+The MQTT client is the dependency-free CF-3.5 MQTT 3.1.1 client shared with
+the sibling `mpc3-ha-bridge` (same role as
+[fasteddy516/SimplMQTT](https://github.com/fasteddy516/SimplMQTT)): CONNECT
+with optional credentials + last-will, QoS-0 PUBLISH/SUBSCRIBE, keepalive,
+and auto-reconnect. No TLS — front it with an MQTT-over-TLS proxy if needed.
+
+Topics live under `<BaseTopic>/<DeviceId>/`:
+
+```
+status                     online | offline   (retained, last-will)
+led/<name>/state           ON | OFF           (retained)   name = power|mute|btn01..btn10
+led/<name>/set             -> subscribe; command an LED on/off
+volume/state               0..100             (retained)
+volume/set                 -> subscribe; set volume
+mute/state                 ON | OFF           (retained)
+mute/set                   -> subscribe; toggle mute
+button/<name>/event        pressed | released (not retained)
+```
+
+With `HaDiscovery: true` it also publishes Home Assistant discovery configs
+under `DiscoveryPrefix` (default `homeassistant`): a switch per LED + mute, a
+number for volume, and device-automation triggers for every button edge — so
+the panel appears in HA with no YAML. Set `HaDiscovery: false` for a plain
+generic-MQTT bridge.
+
+To validate without installing a broker, `tools/Test-MqttBroker.ps1` is a
+throwaway single-client broker stub that accepts the connection and prints
+every PUBLISH it receives.
 
 ## Build + deploy
 
@@ -162,6 +217,7 @@ mpctcp vol 75                 set volume bargraph
 mpctcp mute on                set mute state
 mpctcp emit btn03 press       inject a synthetic button event (broadcasts to clients)
 mpctcp clients                show tcp + web client counts
+mpctcp diag                   dump live panel signal values (volume raw/%, CW/CCW, button state)
 ```
 
 When a physical button is pressed, you'll also see a `[mpc3] button
@@ -179,13 +235,15 @@ crestron/
 |-- Mpc3TcpBridge.sln              VS 2008 solution
 `-- Mpc3TcpBridge/
     |-- ControlSystem.cs           entry point + console commands
-    |-- Config/AppSettings.cs      /User/appsettings.json loader
+    |-- Config/AppSettings.cs      /User/appsettings.json loader + saver
     |-- Hardware/Mpc3Wrapper.cs    panel buttons / LEDs / volume <-> DeviceState
     |-- State/DeviceState.cs       in-memory model, event source
     |-- State/ButtonNames.cs       canonical button identifiers
     |-- Tcp/TcpServer.cs           JSON-per-line TCP server (Crestron TCPServer)
-    |-- Web/WebServer.cs           HTTP/1.1 + SSE server (port 8080)
-    |-- Web/Static.cs              inline HTML/CSS/JS for the panel page
+    |-- Mqtt/MqttClient.cs         dependency-free MQTT 3.1.1 client (CF 3.5)
+    |-- Mqtt/MqttBridge.cs         DeviceState <-> MQTT + HA discovery
+    |-- Web/WebServer.cs           HTTP/1.1 + SSE server, settings API (port 8080)
+    |-- Web/Static.cs              inline HTML/CSS/JS for the panel + /config pages
     |-- ProgramInfo.config
     |-- appsettings.sample.json
     `-- Properties/
@@ -193,5 +251,20 @@ crestron/
 tools/
 |-- Build-Cpz.ps1                  drive VS 2008 DTE to produce .cpz
 |-- Deploy-Cpz.ps1                 pscp upload + plink progload
-`-- Build-And-Deploy.ps1           chain the two for inner-loop dev
+|-- Build-And-Deploy.ps1          chain the two for inner-loop dev
+|-- Watch-Stream.ps1              tail the JSON-over-TCP event stream
+|-- Crestron-Console.ps1         drive the Crestron console over telnet (no SSH)
+`-- Test-MqttBroker.ps1          throwaway MQTT broker stub for end-to-end testing
+
+docs/
+`-- DESIGN-NOTES.md               architecture + MPC3 firmware findings (read this)
 ```
+
+## Further reading
+
+[`docs/DESIGN-NOTES.md`](docs/DESIGN-NOTES.md) is the engineering write-up:
+architecture and data flow, the hard-won MPC3 panel-input findings (the
+`Register()` + `Enable*Button` requirements on firmware 1.8001.6192, absolute
+vs. relative volume reporting, and how a resident Crestron Home / AV-Framework
+app can silently own the front panel), the MQTT design, and the build/deploy
+toolchain.

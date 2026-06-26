@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Text;
 using Crestron.SimplSharp;
 using Crestron.SimplSharp.CrestronSockets;
+using Crestron.SimplSharpPro;
+using Mpc3TcpBridge.Config;
 using Mpc3TcpBridge.State;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
@@ -34,6 +36,8 @@ namespace Mpc3TcpBridge.Web
         private const int MaxRequestBytes = 65536;
 
         private readonly DeviceState _state;
+        private readonly AppSettings _settings;
+        private readonly Func<bool> _mqttConnected;
         private readonly int _port;
         private readonly string _bind;
         private TCPServer _server;
@@ -44,9 +48,12 @@ namespace Mpc3TcpBridge.Web
         private readonly Dictionary<uint, bool> _sse = new Dictionary<uint, bool>();
         private bool _disposing;
 
-        public WebServer(DeviceState state, int port, string bindAddress)
+        public WebServer(DeviceState state, AppSettings settings, int port, string bindAddress,
+                         Func<bool> mqttConnected)
         {
             _state = state;
+            _settings = settings;
+            _mqttConnected = mqttConnected;
             _port = port > 0 ? port : DefaultPort;
             _bind = string.IsNullOrEmpty(bindAddress) ? "0.0.0.0" : bindAddress;
         }
@@ -254,6 +261,25 @@ namespace Mpc3TcpBridge.Web
                 SendSimple(clientIndex, 200, "OK", "text/html; charset=utf-8", Static.IndexHtml);
                 return;
             }
+            if (method == "GET" && (path == "/config" || path == "/config.html"))
+            {
+                SendSimple(clientIndex, 200, "OK", "text/html; charset=utf-8", Static.ConfigHtml);
+                return;
+            }
+            if (path == "/api/settings")
+            {
+                if (method == "GET")  { SendSimple(clientIndex, 200, "OK", "application/json", BuildSettingsJson()); return; }
+                if (method == "POST") { SendSimple(clientIndex, 200, "OK", "application/json", SaveSettings(body)); return; }
+                SendSimple(clientIndex, 405, "Method Not Allowed", "application/json", "{\"ok\":false,\"error\":\"use GET or POST\"}");
+                return;
+            }
+            if (method == "POST" && path == "/api/restart")
+            {
+                SendSimple(clientIndex, 200, "OK", "application/json", "{\"ok\":true,\"restarting\":true}");
+                // Reply has been flushed; reset shortly after so the response lands.
+                new CTimer(_ => InvokeProgReset(), null, 750);
+                return;
+            }
             if (method == "GET" && path == "/api/state")
             {
                 SendSimple(clientIndex, 200, "OK", "application/json", BuildStateEvent());
@@ -441,13 +467,90 @@ namespace Mpc3TcpBridge.Web
         private string BuildStateEvent()
         {
             var snap = _state.CaptureSnapshot();
+            bool mqtt = false;
+            try { mqtt = _mqttConnected != null && _mqttConnected(); } catch { }
             return BuildJson(new
             {
                 @event = "state",
                 leds = snap.Leds,
                 volume = snap.VolumePercent,
-                muted = snap.Muted
+                muted = snap.Muted,
+                mqtt_connected = mqtt
             });
+        }
+
+        // ---- settings (GET/POST /api/settings) ----
+
+        private string BuildSettingsJson()
+        {
+            // Ship settings to the browser with the MQTT password redacted.
+            var jo = JObject.FromObject(_settings);
+            if (jo["Mqtt"] != null && jo["Mqtt"]["Password"] != null)
+                jo["Mqtt"]["Password"] = "";
+            return jo.ToString(Formatting.None);
+        }
+
+        private string SaveSettings(string body)
+        {
+            if (string.IsNullOrEmpty(body))
+                return BuildJson(new { ok = false, error = "empty body" });
+
+            AppSettings incoming;
+            try { incoming = JsonConvert.DeserializeObject<AppSettings>(body); }
+            catch (Exception e) { return BuildJson(new { ok = false, error = "bad json: " + e.Message }); }
+            if (incoming == null) return BuildJson(new { ok = false, error = "invalid settings json" });
+            if (incoming.Mqtt == null) incoming.Mqtt = new AppSettings.MqttSettings();
+            if (incoming.Volume == null) incoming.Volume = new AppSettings.VolumeSettings();
+
+            // Empty password means "keep current" - the UI never echoes it back.
+            if (string.IsNullOrEmpty(incoming.Mqtt.Password))
+                incoming.Mqtt.Password = _settings.Mqtt.Password;
+
+            if (string.IsNullOrEmpty(incoming.DeviceId))
+                return BuildJson(new { ok = false, error = "DeviceId is required" });
+            if (incoming.Mqtt.Port < 1 || incoming.Mqtt.Port > 65535)
+                return BuildJson(new { ok = false, error = "MQTT port out of range" });
+            if (incoming.Volume.DefaultLevel < 0 || incoming.Volume.DefaultLevel > 100)
+                return BuildJson(new { ok = false, error = "Volume.DefaultLevel must be 0..100" });
+
+            // Copy only the UI-managed fields into the live settings so Tcp/Web
+            // (not on this page) are preserved, then persist the whole object.
+            try
+            {
+                _settings.DeviceId     = incoming.DeviceId;
+                _settings.FriendlyName = incoming.FriendlyName;
+                _settings.Mqtt.Enabled          = incoming.Mqtt.Enabled;
+                _settings.Mqtt.Host             = incoming.Mqtt.Host;
+                _settings.Mqtt.Port             = incoming.Mqtt.Port;
+                _settings.Mqtt.Username         = incoming.Mqtt.Username;
+                _settings.Mqtt.Password         = incoming.Mqtt.Password;
+                _settings.Mqtt.BaseTopic        = incoming.Mqtt.BaseTopic;
+                _settings.Mqtt.HaDiscovery      = incoming.Mqtt.HaDiscovery;
+                _settings.Mqtt.DiscoveryPrefix  = incoming.Mqtt.DiscoveryPrefix;
+                _settings.Mqtt.KeepAliveSeconds = incoming.Mqtt.KeepAliveSeconds;
+                _settings.Volume.DefaultLevel   = incoming.Volume.DefaultLevel;
+                _settings.Save();
+                return BuildJson(new { ok = true, restart_required = true });
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Warn("[web] settings save: {0}", e.Message);
+                return BuildJson(new { ok = false, error = e.Message });
+            }
+        }
+
+        private static void InvokeProgReset()
+        {
+            try
+            {
+                var slot = InitialParametersClass.ApplicationNumber;
+                string response = string.Empty;
+                CrestronConsole.SendControlSystemCommand("progreset -P:" + slot, ref response);
+            }
+            catch (Exception e)
+            {
+                ErrorLog.Warn("[web] progreset failed: {0}", e.Message);
+            }
         }
 
         private static string BuildJson(object payload)

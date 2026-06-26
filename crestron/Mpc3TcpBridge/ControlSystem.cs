@@ -4,6 +4,7 @@ using Crestron.SimplSharpPro;
 using Crestron.SimplSharpPro.CrestronThread;
 using Mpc3TcpBridge.Config;
 using Mpc3TcpBridge.Hardware;
+using Mpc3TcpBridge.Mqtt;
 using Mpc3TcpBridge.State;
 using Mpc3TcpBridge.Tcp;
 using Mpc3TcpBridge.Web;
@@ -26,6 +27,7 @@ namespace Mpc3TcpBridge
         private Mpc3Wrapper _hw;
         private TcpServer _tcp;
         private WebServer _web;
+        private MqttBridge _mqtt;
 
         public ControlSystem()
             : base()
@@ -67,9 +69,16 @@ namespace Mpc3TcpBridge
                 _tcp = new TcpServer(_settings, _state);
                 _tcp.Start();
 
+                // MQTT bridge: publishes panel state and accepts commands.
+                // No-op until a broker host is set (via /config web page).
+                _mqtt = new MqttBridge(_settings, _state);
+                _mqtt.Start();
+
                 if (_settings.Web != null && _settings.Web.Port > 0)
                 {
-                    _web = new WebServer(_state, _settings.Web.Port, _settings.Web.BindAddress);
+                    _web = new WebServer(_state, _settings, _settings.Web.Port,
+                        _settings.Web.BindAddress,
+                        delegate { return _mqtt != null && _mqtt.IsConnected; });
                     _web.Start();
                 }
                 else
@@ -160,6 +169,14 @@ namespace Mpc3TcpBridge
                         _web == null ? 0 : _web.ClientCount,
                         _web == null ? 0 : _web.SseClientCount);
                 }
+                else if (cmd == "diag")
+                {
+                    // Dump live panel signal values - the key tool for the dial.
+                    if (_hw != null)
+                        _hw.DumpDiagnostics(WriteConsoleLine);
+                    else
+                        CrestronConsole.ConsoleCommandResponse("no hardware\r\n");
+                }
                 else
                 {
                     CrestronConsole.ConsoleCommandResponse(
@@ -169,13 +186,21 @@ namespace Mpc3TcpBridge
                         "  mpctcp vol <0..100>                - set volume bargraph\r\n" +
                         "  mpctcp mute on|off                 - set mute state\r\n" +
                         "  mpctcp emit <name> press|release   - inject a fake button event\r\n" +
-                        "  mpctcp clients                     - show connected TCP client count\r\n");
+                        "  mpctcp clients                     - show connected TCP client count\r\n" +
+                        "  mpctcp diag                        - dump live panel signal values\r\n");
                 }
             }
             catch (Exception e)
             {
                 CrestronConsole.ConsoleCommandResponse("error: {0}\r\n", e.Message);
             }
+        }
+
+        // Adapter so Mpc3Wrapper.DumpDiagnostics can write one line at a time
+        // back to whoever issued `mpctcp diag` on the console.
+        private static void WriteConsoleLine(string line)
+        {
+            CrestronConsole.ConsoleCommandResponse("{0}\r\n", line);
         }
 
         private static bool IsOn(string s)
@@ -190,9 +215,10 @@ namespace Mpc3TcpBridge
             if (type == eProgramStatusEventType.Stopping)
             {
                 CrestronConsole.PrintLine("=== mpc3-tcp-bridge stopping ===");
-                try { if (_web != null) _web.Dispose(); } catch { }
-                try { if (_tcp != null) _tcp.Dispose(); } catch { }
-                try { if (_hw  != null) _hw.Dispose();  } catch { }
+                try { if (_web  != null) _web.Dispose(); }  catch { }
+                try { if (_mqtt != null) _mqtt.Dispose(); } catch { }
+                try { if (_tcp  != null) _tcp.Dispose(); }  catch { }
+                try { if (_hw   != null) _hw.Dispose();  }  catch { }
             }
         }
 

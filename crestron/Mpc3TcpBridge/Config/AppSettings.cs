@@ -15,11 +15,22 @@ namespace Mpc3TcpBridge.Config
     //   plink admin@<mpc> progres -P:01
     public sealed class AppSettings
     {
+        // Identity. DeviceId is the MQTT topic component and HA unique_id base -
+        // keep it stable after first install. FriendlyName is the display label.
+        [JsonProperty("DeviceId")]
+        public string DeviceId = "mpc3-302";
+
+        [JsonProperty("FriendlyName")]
+        public string FriendlyName = "MPC3 Controller";
+
         [JsonProperty("Tcp")]
         public TcpSettings Tcp = new TcpSettings();
 
         [JsonProperty("Web")]
         public WebSettings Web = new WebSettings();
+
+        [JsonProperty("Mqtt")]
+        public MqttSettings Mqtt = new MqttSettings();
 
         [JsonProperty("Volume")]
         public VolumeSettings Volume = new VolumeSettings();
@@ -52,6 +63,41 @@ namespace Mpc3TcpBridge.Config
             public string BindAddress = "0.0.0.0";
         }
 
+        public sealed class MqttSettings
+        {
+            [JsonProperty("Enabled")]
+            public bool Enabled = false;        // off until a broker is configured
+
+            [JsonProperty("Host")]
+            public string Host = "";
+
+            [JsonProperty("Port")]
+            public int Port = 1883;
+
+            [JsonProperty("Username")]
+            public string Username = "";
+
+            [JsonProperty("Password")]
+            public string Password = "";
+
+            // All topics for this device live under <BaseTopic>/<DeviceId>/...
+            [JsonProperty("BaseTopic")]
+            public string BaseTopic = "mpc3";
+
+            // Publish Home Assistant MQTT discovery configs. Set false for a
+            // plain generic-MQTT bridge with no HA-specific topics.
+            [JsonProperty("HaDiscovery")]
+            public bool HaDiscovery = true;
+
+            // HA's MQTT discovery prefix - only change if you've overridden
+            // discovery_prefix in HA. Ignored when HaDiscovery is false.
+            [JsonProperty("DiscoveryPrefix")]
+            public string DiscoveryPrefix = "homeassistant";
+
+            [JsonProperty("KeepAliveSeconds")]
+            public int KeepAliveSeconds = 30;
+        }
+
         public sealed class VolumeSettings
         {
             [JsonProperty("DefaultLevel")]
@@ -76,7 +122,10 @@ namespace Mpc3TcpBridge.Config
                     {
                         if (s.Tcp == null)    s.Tcp    = new TcpSettings();
                         if (s.Web == null)    s.Web    = new WebSettings();
+                        if (s.Mqtt == null)   s.Mqtt   = new MqttSettings();
                         if (s.Volume == null) s.Volume = new VolumeSettings();
+                        if (string.IsNullOrEmpty(s.DeviceId))     s.DeviceId     = "mpc3-302";
+                        if (string.IsNullOrEmpty(s.FriendlyName)) s.FriendlyName = "MPC3 Controller";
                         ErrorLog.Notice("[settings] loaded {0}", UserPath);
                         return s;
                     }
@@ -88,6 +137,24 @@ namespace Mpc3TcpBridge.Config
             }
             ErrorLog.Notice("[settings] using defaults (no {0})", UserPath);
             return new AppSettings();
+        }
+
+        // Persist current settings to \User\appsettings.json. The Crestron
+        // filesystem has no File.Replace, so write a sibling .tmp first and then
+        // delete+copy - the .tmp survives a partial write at least.
+        public void Save()
+        {
+            var tmp = UserPath + ".tmp";
+            var json = JsonConvert.SerializeObject(this, Formatting.Indented);
+            using (var writer = new StreamWriter(tmp, false, Encoding.UTF8))
+            {
+                writer.Write(json);
+                writer.Flush();
+            }
+            try { if (File.Exists(UserPath)) File.Delete(UserPath); } catch { }
+            File.Copy(tmp, UserPath);
+            try { File.Delete(tmp); } catch { }
+            ErrorLog.Notice("[settings] saved to {0}", UserPath);
         }
     }
 }

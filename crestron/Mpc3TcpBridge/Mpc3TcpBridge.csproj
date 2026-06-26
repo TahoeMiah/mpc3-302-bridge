@@ -80,6 +80,8 @@
     <Compile Include="ControlSystem.cs" />
     <Compile Include="Config\AppSettings.cs" />
     <Compile Include="Hardware\Mpc3Wrapper.cs" />
+    <Compile Include="Mqtt\MqttClient.cs" />
+    <Compile Include="Mqtt\MqttBridge.cs" />
     <Compile Include="State\ButtonNames.cs" />
     <Compile Include="State\DeviceState.cs" />
     <Compile Include="State\Parse.cs" />
